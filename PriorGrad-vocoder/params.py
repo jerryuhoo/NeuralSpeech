@@ -100,12 +100,12 @@ params = AttrDict(
     downsampling_preconv_out_channels=32,
     downsampling_out_channels=[128, 128, 256, 512],
     downsampling_dilations=[[1, 2, 4], [1, 2, 4], [1, 2, 4], [1, 2, 4]],
-    training_noise_schedule={  # format adapted for params structure
-        "n_iter": 1000,
-        "betas_range": [1.0e-6, 0.01],
-    },
-    test_noise_schedule={  # format adapted for params structure
-        "n_iter": 50,
-        "betas_range": [1.0e-6, 0.01],
-    },
+    # training_noise_schedule={  # format adapted for params structure
+    #     "n_iter": 1000,
+    #     "betas_range": [1.0e-6, 0.01],
+    # },
+    # test_noise_schedule={  # format adapted for params structure
+    #     "n_iter": 50,
+    #     "betas_range": [1.0e-6, 0.01],
+    # },
 )
