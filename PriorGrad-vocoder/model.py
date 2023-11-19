@@ -37,6 +37,26 @@ from math import sqrt
 Linear = nn.Linear
 ConvTranspose2d = nn.ConvTranspose2d
 
+# for wavegrad
+from base import BaseModule
+from downsampling import (
+    DownsamplingBlock as DBlock,
+)
+
+from layers import (
+    Conv1dWithInitialization,
+)
+
+from linear_modulation import (
+    FeatureWiseLinearModulation as FiLM,
+)
+
+from upsampling import (
+    UpsamplingBlock as UBlock,
+)
+
+import numpy as np
+
 
 def Conv1d(*args, **kwargs):
     layer = nn.Conv1d(*args, **kwargs)
@@ -52,7 +72,9 @@ def silu(x):
 class DiffusionEmbedding(nn.Module):
     def __init__(self, max_steps):
         super().__init__()
-        self.register_buffer('embedding', self._build_embedding(max_steps), persistent=False)
+        self.register_buffer(
+            "embedding", self._build_embedding(max_steps), persistent=False
+        )
         self.projection1 = Linear(128, 512)
         self.projection2 = Linear(512, 512)
 
@@ -101,11 +123,19 @@ class SpectrogramUpsampler(nn.Module):
 class ResidualBlock(nn.Module):
     def __init__(self, n_mels, residual_channels, dilation, n_cond_global=None):
         super().__init__()
-        self.dilated_conv = Conv1d(residual_channels, 2 * residual_channels, 3, padding=dilation, dilation=dilation)
+        self.dilated_conv = Conv1d(
+            residual_channels,
+            2 * residual_channels,
+            3,
+            padding=dilation,
+            dilation=dilation,
+        )
         self.diffusion_projection = Linear(512, residual_channels)
         self.conditioner_projection = Conv1d(n_mels, 2 * residual_channels, 1)
         if n_cond_global is not None:
-            self.conditioner_projection_global = Conv1d(n_cond_global, 2 * residual_channels, 1)
+            self.conditioner_projection_global = Conv1d(
+                n_cond_global, 2 * residual_channels, 1
+            )
         self.output_projection = Conv1d(residual_channels, 2 * residual_channels, 1)
 
     def forward(self, x, conditioner, diffusion_step, conditioner_global=None):
@@ -133,8 +163,9 @@ class PriorGrad(nn.Module):
         self.use_prior = params.use_prior
         self.condition_prior = params.condition_prior
         self.condition_prior_global = params.condition_prior_global
-        assert not (self.condition_prior and self.condition_prior_global),\
-          "use only one option for conditioning on the prior"
+        assert not (
+            self.condition_prior and self.condition_prior_global
+        ), "use only one option for conditioning on the prior"
         print("use_prior: {}".format(self.use_prior))
         self.n_mels = params.n_mels
         self.n_cond = None
@@ -151,34 +182,182 @@ class PriorGrad(nn.Module):
         self.spectrogram_upsampler = SpectrogramUpsampler(self.n_mels)
         if self.condition_prior_global:
             self.global_condition_upsampler = SpectrogramUpsampler(self.n_cond)
-        self.residual_layers = nn.ModuleList([
-            ResidualBlock(self.n_mels, params.residual_channels, 2 ** (i % params.dilation_cycle_length),
-                          n_cond_global=self.n_cond)
-            for i in range(params.residual_layers)
-        ])
-        self.skip_projection = Conv1d(params.residual_channels, params.residual_channels, 1)
+        self.residual_layers = nn.ModuleList(
+            [
+                ResidualBlock(
+                    self.n_mels,
+                    params.residual_channels,
+                    2 ** (i % params.dilation_cycle_length),
+                    n_cond_global=self.n_cond,
+                )
+                for i in range(params.residual_layers)
+            ]
+        )
+        self.skip_projection = Conv1d(
+            params.residual_channels, params.residual_channels, 1
+        )
         self.output_projection = Conv1d(params.residual_channels, 1, 1)
         nn.init.zeros_(self.output_projection.weight)
+        self.wavegrad = WaveGradNN(params)
 
-        print('num param: {}'.format(sum(p.numel() for p in self.parameters() if p.requires_grad)))
+        print(
+            "num param: {}".format(
+                sum(p.numel() for p in self.parameters() if p.requires_grad)
+            )
+        )
 
-    def forward(self, audio, spectrogram, diffusion_step, global_cond=None):
-        x = audio.unsqueeze(1)
-        x = self.input_projection(x)
-        x = F.relu(x)
+    def forward(
+        self, audio, spectrogram, diffusion_step, noise_level, global_cond=None
+    ):
+        # x = self.input_projection(x)
+        # x = F.relu(x)
 
         diffusion_step = self.diffusion_embedding(diffusion_step)
-        spectrogram = self.spectrogram_upsampler(spectrogram)
+        # spectrogram = self.spectrogram_upsampler(spectrogram)
         if global_cond is not None:
             global_cond = self.global_condition_upsampler(global_cond)
 
         skip = []
-        for layer in self.residual_layers:
-            x, skip_connection = layer(x, spectrogram, diffusion_step, global_cond)
-            skip.append(skip_connection)
 
-        x = torch.sum(torch.stack(skip), dim=0) / sqrt(len(self.residual_layers))
-        x = self.skip_projection(x)
-        x = F.relu(x)
-        x = self.output_projection(x)
+        # print("audio.shape: {}".format(audio.shape))
+        # print("spectrogram.shape: {}".format(spectrogram.shape))
+        # print("diffusion_step.shape: {}".format(diffusion_step.shape))
+        # print("noise_level.shape: {}".format(noise_level.shape))
+        x = self.wavegrad(mels=spectrogram, yn=audio, noise_level=noise_level)
+
+        # for layer in self.residual_layers:
+        #     x, skip_connection = layer(x, spectrogram, diffusion_step, global_cond)
+        #     skip.append(skip_connection)
+
+        # print("x.shape: {}".format(x.shape))
+
+        # x = torch.sum(torch.stack(skip), dim=0) / sqrt(len(self.residual_layers))
+        # x = self.skip_projection(x)
+        # x = F.relu(x)
+        # x = self.output_projection(x)
         return x
+
+
+class WaveGradNN(BaseModule):
+    """
+    WaveGrad is a fully-convolutional mel-spectrogram conditional
+    vocoder model for waveform generation introduced in
+    "WaveGrad: Estimating Gradients for Waveform Generation" paper (link: https://arxiv.org/pdf/2009.00713.pdf).
+    The concept is built on the prior work on score matching and diffusion probabilistic models.
+    Current implementation follows described architecture in the paper.
+    """
+
+    def __init__(self, config) -> None:
+        super(WaveGradNN, self).__init__()
+        # Building upsampling branch (mels -> signal)
+        self.ublock_preconv = Conv1dWithInitialization(
+            in_channels=80,
+            out_channels=config.upsampling_preconv_out_channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+        )
+        upsampling_in_sizes = [
+            config.upsampling_preconv_out_channels
+        ] + config.upsampling_out_channels[:-1]
+        self.ublocks = torch.nn.ModuleList(
+            [
+                UBlock(
+                    in_channels=in_size,
+                    out_channels=out_size,
+                    factor=factor,
+                    dilations=dilations,
+                )
+                for in_size, out_size, factor, dilations in zip(
+                    upsampling_in_sizes,
+                    config.upsampling_out_channels,
+                    config.factors,
+                    config.upsampling_dilations,
+                )
+            ]
+        )
+        self.ublock_postconv = Conv1dWithInitialization(
+            in_channels=config.upsampling_out_channels[-1],
+            out_channels=1,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+        )
+
+        # Building downsampling branch (starting from signal)
+        self.dblock_preconv = Conv1dWithInitialization(
+            in_channels=1,
+            out_channels=config.downsampling_preconv_out_channels,
+            kernel_size=5,
+            stride=1,
+            padding=2,
+        )
+        downsampling_in_sizes = [
+            config.downsampling_preconv_out_channels
+        ] + config.downsampling_out_channels[:-1]
+        self.dblocks = torch.nn.ModuleList(
+            [
+                DBlock(
+                    in_channels=in_size,
+                    out_channels=out_size,
+                    factor=factor,
+                    dilations=dilations,
+                )
+                for in_size, out_size, factor, dilations in zip(
+                    downsampling_in_sizes,
+                    config.downsampling_out_channels,
+                    config.factors[1:][::-1],
+                    config.downsampling_dilations,
+                )
+            ]
+        )
+        # Building FiLM connections (in order of downscaling stream)
+        film_in_sizes = [32] + list(config.downsampling_out_channels)
+        film_out_sizes = list(config.upsampling_out_channels[::-1])
+        film_factors = [1] + list(config.factors[1:][::-1])
+        self.films = torch.nn.ModuleList(
+            [
+                FiLM(
+                    in_channels=in_size,
+                    out_channels=out_size,
+                    input_dscaled_by=np.product(
+                        film_factors[: i + 1]
+                    ),  # for proper positional encodings initialization
+                )
+                for i, (in_size, out_size) in enumerate(
+                    zip(film_in_sizes, film_out_sizes)
+                )
+            ]
+        )
+
+    def forward(self, mels, yn, noise_level):
+        """
+        Computes forward pass of neural network.
+        :param mels (torch.Tensor): mel-spectrogram acoustic features of shape [B, n_mels, T//hop_length]
+        :param yn (torch.Tensor): noised signal `y_n` of shape [B, T]
+        :param noise_level (float): level of noise added by diffusion
+        :return (torch.Tensor): epsilon noise
+        """
+        # Prepare inputs
+        assert len(mels.shape) == 3  # B, n_mels, T
+        yn = yn.unsqueeze(1)
+        assert len(yn.shape) == 3  # B, 1, T
+
+        # Downsampling stream + Linear Modulation statistics calculation
+        statistics = []
+        dblock_outputs = self.dblock_preconv(yn)
+        scale, shift = self.films[0](x=dblock_outputs, noise_level=noise_level)
+        statistics.append([scale, shift])
+        for dblock, film in zip(self.dblocks, self.films[1:]):
+            dblock_outputs = dblock(dblock_outputs)
+            scale, shift = film(x=dblock_outputs, noise_level=noise_level)
+            statistics.append([scale, shift])
+        statistics = statistics[::-1]
+
+        # Upsampling stream
+        ublock_outputs = self.ublock_preconv(mels)
+        for i, ublock in enumerate(self.ublocks):
+            scale, shift = statistics[i]
+            ublock_outputs = ublock(x=ublock_outputs, scale=scale, shift=shift)
+        outputs = self.ublock_postconv(ublock_outputs)
+        return outputs.squeeze(1)
