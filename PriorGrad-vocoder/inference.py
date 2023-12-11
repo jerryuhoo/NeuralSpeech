@@ -175,7 +175,9 @@ def main(args):
                     0.5,
                 ]
             elif T_OVERRIDE == 50:
-                NOISE_OVERRIDE = np.linspace(1e-4, 0.05, T_OVERRIDE).tolist()
+                # NOISE_OVERRIDE = np.linspace(1e-4, 0.05, T_OVERRIDE).tolist()
+                print("Use 50 steps for fast inference")
+                NOISE_OVERRIDE = np.linspace(1.0e-6, 0.01, 50).tolist()
             else:
                 NOISE_OVERRIDE = np.linspace(1e-4, 0.05, T_OVERRIDE).tolist()
                 print(
@@ -245,6 +247,19 @@ def main(args):
             os.path.join(sample_path, sample_name),
             audio.cpu(),
             sample_rate=model.params.sample_rate,
+            encoding="PCM_S",
+            bits_per_sample=16,
+        )
+        sample_path_gt = sample_path + "ground_truth"
+        if not os.path.exists(sample_path_gt):
+            os.makedirs(sample_path_gt, exist_ok=True)
+
+        torchaudio.save(
+            os.path.join(sample_path_gt, sample_name),
+            audio_gt.cpu(),
+            sample_rate=model.params.sample_rate,
+            encoding="PCM_S",
+            bits_per_sample=16,
         )
 
 

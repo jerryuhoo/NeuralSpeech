@@ -50,7 +50,7 @@ class AttrDict(dict):
 params = AttrDict(
     # Training params
     batch_size=16,
-    learning_rate=2e-4,
+    learning_rate=1e-4,
     max_grad_norm=None,
     use_l2loss=True,
     n_iterations=100000000,  # added from config
@@ -83,8 +83,10 @@ params = AttrDict(
     residual_layers=30,
     residual_channels=64,
     dilation_cycle_length=10,
-    noise_schedule=np.linspace(1e-4, 0.05, 50).tolist(),
-    inference_noise_schedule=[0.0001, 0.001, 0.01, 0.05, 0.2, 0.5],  # T>=50
+    # noise_schedule=np.linspace(1e-4, 0.05, 50).tolist(),
+    noise_schedule=np.linspace(1.0e-6, 0.01, 1000).tolist(),
+    # inference_noise_schedule=[0.0001, 0.001, 0.01, 0.05, 0.2, 0.5],  # T>=50
+    inference_noise_schedule=np.linspace(1.0e-6, 0.01, 50).tolist(),
     # Added model settings from config
     # factors=[5, 5, 3, 2, 2], # modified this to make its product equal to 256
     factors=[4, 4, 4, 2, 2],
